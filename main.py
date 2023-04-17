@@ -1,42 +1,90 @@
-
-from fastapi import FastAPI, HTTPException, Request
-from dotenv import load_dotenv
-load_dotenv()
-import boto3
-import os
+import docx
 import openai
-from pydantic import BaseModel
+import os
 
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import FileResponse
+from googletrans import Translator
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Initialize the OpenAI API with your API key
+openai.api_key = os.environ.get('OPENAI_SECRET_KEY')
+
+# Initialize the FastAPI app
 app = FastAPI()
 
-class TextToTranslate(BaseModel):
-    text: str
+translate_client = Translator()
 
-openai.api_key = os.getenv("OPENAI_SECRET_KEY")
+# Define the endpoint to translate the Word document
+@app.post("/translate/")
+async def translate_document(file: UploadFile = File(...)):
 
-def paraphrase_text(text, format):
-    response = openai.Completion.create(
-        engine="text-davinci-002",
-        prompt=(f"Please rephrase the following text {format}: {text}"),
-        temperature=0.7,
-        max_tokens=1000
+    # Save the uploaded file to the "uploads" directory
+    file_location = f"uploads/{file.filename}"
+    with open(file_location, "wb") as file_object:
+        file_object.write(await file.read())
+
+    # Load the Word document using the python-docx library
+    doc = docx.Document(file_location)
+
+    # Initialize an empty list to store the translated rows
+    translated_rows = []
+
+    # Loop over each row in the table and rephrase the sentence using the OpenAI GPT model
+    for table in doc.tables:
+        for row in table.rows:
+            # Extract the text from the first cell of the row
+            sentence = row.cells[0].text.strip()
+            # Use the OpenAI GPT model to rephrase the sentence
+            rephrased_sentence = openai.Completion.create(
+                engine="text-davinci-002",
+                prompt=f"Rephrase the following text: '{sentence}'",
+                temperature=0.5,
+                max_tokens=400,
+                n=1,
+                stop=None,
+                timeout=20,
+            ).choices[0].text.strip()
+            # rephrased_sentence = sentence
+            # Append the rephrased sentence to the list of translated rows
+            translated_rows.append([sentence, rephrased_sentence])
+
+    # Create a new Word document
+    translated_document = docx.Document()
+    
+    translated_table = translated_document.add_table(rows=0, cols=2)
+    translated_table.style = "Table Grid"
+    
+    # Translate each row in the table
+    for i, row in enumerate(translated_rows):
+        # Get the English text from the first cell in the row
+        original_en_text = row[0]
+        rephrased_en_text = row[1]
+
+        # Use the Google Translate API to translate the text to Arabic
+        original_translation = translate_client.translate(original_en_text, dest='ar').text
+        rephrased_translation = translate_client.translate(rephrased_en_text, dest='ar').text
+        
+        original_ar_text = original_translation
+        rephrased_ar_text = rephrased_translation    
+        
+        original_new_row = translated_table.add_row()
+        original_new_row.cells[0].text = original_en_text
+        original_new_row.cells[1].text = original_ar_text
+        
+        rephrased_new_row = translated_table.add_row()
+        rephrased_new_row.cells[0].text = rephrased_en_text
+        rephrased_new_row.cells[1].text = rephrased_ar_text
+    
+    # Save the translated document to a new file
+    translated_file_path = f"uploads/{file.filename.split('.')[0]}_translated.docx"
+    translated_document.save(translated_file_path)
+
+    # Return the translated Word document to the client as a file download
+    return FileResponse(
+        translated_file_path,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=translated_file_path
     )
-    return response["choices"][0]["text"]
-   
-@app.post("/translate")
-async def translate(testInput: TextToTranslate, request: Request):
-    if(request.headers.get("api_key") != "mysecretkey"):
-        raise HTTPException(status_code=400, detail="Invalid API key")
-    
-    source_language = "en"
-    target_language = "ar"
-
-    paraphrased_text = paraphrase_text(testInput.text, "in a formal way")
-    client = boto3.client('translate', region_name='us-east-1', aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                      aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"))
-    try:
-        response = client.translate_text(Text=paraphrased_text, SourceLanguageCode=source_language, TargetLanguageCode=target_language)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail="Error translating text")
-    
-    return {"result": response["TranslatedText"], "paraphrased_text": paraphrased_text}
